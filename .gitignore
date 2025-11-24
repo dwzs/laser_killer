@@ -1,0 +1,4 @@
+.env/
+.lgd-nfy0
+./__pycache__/
+./control/galvo/__pycache__/
