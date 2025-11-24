@@ -1,4 +1,20 @@
+# 虚拟环境
 .env/
+
+# 临时文件
 .lgd-nfy0
-./__pycache__/
-./control/galvo/__pycache__/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE
+.vscode/
+.idea/
+
+# 标定数据和图像（可选）
+# sense/*/calib/calib_images/
+# sense/*/calib/*.npz
+# sense/*/calib/*.json
