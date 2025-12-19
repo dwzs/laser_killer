@@ -15,6 +15,7 @@ import math
 from collections import deque
 import shutil
 import subprocess
+import time
 
 # ========== 配置参数 ==========
 # 摄像头/视频参数（集中在这里方便改）
@@ -23,6 +24,7 @@ CAM_WIDTH = 640            # 0 表示不强制设置
 CAM_HEIGHT = 480           # 0 表示不强制设置
 CAM_FPS = 30               # 0 表示不强制设置
 PRINT_CAM_FORMATS = True   # 启动时打印摄像头支持的格式（需要系统安装 v4l2-ctl）
+SHOW_UI = False             # 是否显示窗口（False 时不显示，Ctrl+C 退出）
 
 # 背景剪切参数
 # 两帧差分参数（适用于相机基本静止）
@@ -307,148 +309,153 @@ def main():
     paused = False
     delay = int(1000 / fps) if fps > 0 else 30
     
-    while True:
-        if not paused:
-            ret, frame = cap.read()
-            if not ret:
-                print("读取摄像头失败，退出")
-                break
-            
-            frame_idx += 1
-            curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            
-            # === 1. 背景剪切 ===
-            motion_mask = detect_motion(prev_gray, curr_gray, DIFF_THRESHOLD, MIN_CHANGE_AREA)
+    try:
+        while True:
+            if not paused:
+                ret, frame = cap.read()
+                if not ret:
+                    print("读取摄像头失败，退出")
+                    break
 
-            # === 2. 颜色筛选 ===
-            color_mask = filter_black_color(frame, motion_mask, BLACK_MAX)
+                frame_idx += 1
+                curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-            # 颜色筛选后所有轮廓（用于 pd）
-            all_contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                # === 1. 背景剪切 ===
+                motion_mask = detect_motion(prev_gray, curr_gray, DIFF_THRESHOLD, MIN_CHANGE_AREA)
 
-            # === 3. 形状筛选 ===
-            shape_mask, curr_centers, contours = filter_by_shape(
-                color_mask, MIN_AREA, MAX_AREA, MIN_CIRCULARITY
-            )
+                # === 2. 颜色筛选 ===
+                color_mask = filter_black_color(frame, motion_mask, BLACK_MAX)
 
-            # === 4. 跟踪 ===
-            matches = track_mosquitos(prev_centers, curr_centers, MATCH_BOX_SIZE)
+                # 颜色筛选后所有轮廓（用于 pd）
+                all_contours, _ = cv2.findContours(color_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
-            tracked_frame = frame.copy()
-            
-            # 绘制跟踪结果
-            for i, center_info in enumerate(curr_centers):
-                cx, cy, area, w, h = center_info
-                x, y = int(cx), int(cy)
-                
-                # 检查是否被跟踪
-                is_tracked = any(m[0] == i for m in matches)
-                
-                if is_tracked:
-                    # 被跟踪的蚊子：红色圆圈
-                    cv2.circle(tracked_frame, (x, y), 20, (0, 0, 255), 2)
-                    # 显示信息
-                    info = f"ID:{i} A:{int(area)}"
-                    cv2.putText(tracked_frame, info, (x + 25, y), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-                else:
-                    # 新出现的蚊子：绿色圆圈
-                    cv2.circle(tracked_frame, (x, y), 15, (0, 255, 0), 2)
-                
-                # 绘制中心点
-                cv2.circle(tracked_frame, (x, y), 3, (255, 0, 0), -1)
-            
-            # 打印跟踪信息
-            if curr_centers:
-                tracked_count = len(matches)
-                new_count = len(curr_centers) - tracked_count
-                print(f"[帧{frame_idx}] 检测到 {len(curr_centers)} 只蚊子 | 跟踪={tracked_count} 新={new_count}")
-            
-            # 更新两帧差分缓存 + 跟踪数据
-            prev_gray = curr_gray
-            prev_centers = curr_centers
-            
-            # === 显示结果（pa~pf）===
-            white_bg = np.ones_like(frame) * 255
-            
-            # 1) pa 原始图
-            im_original = frame.copy()
-            
-            # 2) pb 运动图（白底+彩色运动区域）
-            im_motion = white_bg.copy()
-            im_motion[motion_mask > 0] = frame[motion_mask > 0]
-            
-            # 3) pc pb过滤颜色后的彩图（白底+彩色）
-            im_color = white_bg.copy()
-            im_color[color_mask > 0] = frame[color_mask > 0]
-
-            # 4) pd 在 pc 上画所有轮廓
-            im_contour = im_color.copy()
-            cv2.drawContours(im_contour, all_contours, -1, (255, 0, 0), 1)  # 黄：所有轮廓
-
-            # 5) pe 在 pc 上画筛选后的轮廓
-            im_mosquito = im_color.copy()
-            cv2.drawContours(im_mosquito, contours, -1, (0, 255, 0), 1)  # 绿：筛选后轮廓
-
-            # 6) pf 筛选出蚊子（在 pa 上圈出中心）
-            im_tracking = im_original.copy()
-            for center_info in curr_centers:
-                cx, cy, area, w, h = center_info
-                x, y = int(cx), int(cy)
-                cv2.circle(im_tracking, (x, y), 15, (0, 0, 255), 2)
-                cv2.circle(im_tracking, (x, y), 3, (255, 0, 0), -1)
-            
-            # 拼接显示（2x3布局）
-            row1 = np.hstack([im_original, im_motion, im_color])
-            row2 = np.hstack([im_contour, im_mosquito, im_tracking])
-            combined = np.vstack([row1, row2])
-
-            # === 保存片段：原始帧(带框) + combined（同样前/后帧数）===
-            detected = len(curr_centers) > 0
-            if clip_saver is not None:
-                save_frame = frame.copy()
-                for cx, cy, area, ww, hh in curr_centers:
-                    x, y = int(cx), int(cy)
-                    bw = max(10, int(ww))
-                    bh = max(10, int(hh))
-                    x1 = max(0, x - bw // 2)
-                    y1 = max(0, y - bh // 2)
-                    x2 = min(width - 1, x + bw // 2)
-                    y2 = min(height - 1, y + bh // 2)
-                    cv2.rectangle(save_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                clip_saver.push(save_frame, detected, fps or 30.0, width, height, base_name, frame_idx)
-            if clip_saver_combined is not None:
-                ch, cw = combined.shape[:2]
-                clip_saver_combined.push(
-                    combined, detected, fps or 30.0, cw, ch, f"{base_name}_combined", frame_idx
+                # === 3. 形状筛选 ===
+                shape_mask, curr_centers, contours = filter_by_shape(
+                    color_mask, MIN_AREA, MAX_AREA, MIN_CIRCULARITY
                 )
-            
-            # 添加标签
-            cv2.putText(combined, '1.original', (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(combined, '2.motion_filtered', (width + 10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(combined, '3.color_filtered', (width * 2 + 10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(combined, '4.all_contours', (10, height + 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(combined, '5.shape_filtered', (width + 10, height + 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(combined, '6.tracking', (width * 2 + 10, height + 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            
-            cv2.imshow('Mosquito Tracking', combined)
 
-            # （移除二次筛选显示）
-        
-        # 处理按键
-        key = cv2.waitKey(delay if not paused else 100) & 0xFF
-        
-        if key == ord('q'):
-            break
-        elif key == ord(' '):
-            paused = not paused
-            print(f"[帧{frame_idx}] {'暂停' if paused else '继续'}")
+                # === 4. 跟踪 ===
+                matches = track_mosquitos(prev_centers, curr_centers, MATCH_BOX_SIZE)
+
+                tracked_frame = frame.copy()
+
+                # 绘制跟踪结果
+                for i, center_info in enumerate(curr_centers):
+                    cx, cy, area, w, h = center_info
+                    x, y = int(cx), int(cy)
+
+                    # 检查是否被跟踪
+                    is_tracked = any(m[0] == i for m in matches)
+
+                    if is_tracked:
+                        # 被跟踪的蚊子：红色圆圈
+                        cv2.circle(tracked_frame, (x, y), 20, (0, 0, 255), 2)
+                        # 显示信息
+                        info = f"ID:{i} A:{int(area)}"
+                        cv2.putText(tracked_frame, info, (x + 25, y),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+                    else:
+                        # 新出现的蚊子：绿色圆圈
+                        cv2.circle(tracked_frame, (x, y), 15, (0, 255, 0), 2)
+
+                    # 绘制中心点
+                    cv2.circle(tracked_frame, (x, y), 3, (255, 0, 0), -1)
+
+                # 打印跟踪信息
+                if curr_centers:
+                    tracked_count = len(matches)
+                    new_count = len(curr_centers) - tracked_count
+                    print(f"[帧{frame_idx}] 检测到 {len(curr_centers)} 只蚊子 | 跟踪={tracked_count} 新={new_count}")
+
+                # 更新两帧差分缓存 + 跟踪数据
+                prev_gray = curr_gray
+                prev_centers = curr_centers
+
+                # === 显示结果（pa~pf）===
+                white_bg = np.ones_like(frame) * 255
+
+                # 1) pa 原始图
+                im_original = frame.copy()
+
+                # 2) pb 运动图（白底+彩色运动区域）
+                im_motion = white_bg.copy()
+                im_motion[motion_mask > 0] = frame[motion_mask > 0]
+
+                # 3) pc pb过滤颜色后的彩图（白底+彩色）
+                im_color = white_bg.copy()
+                im_color[color_mask > 0] = frame[color_mask > 0]
+
+                # 4) pd 在 pc 上画所有轮廓
+                im_contour = im_color.copy()
+                cv2.drawContours(im_contour, all_contours, -1, (255, 0, 0), 1)  # 黄：所有轮廓
+
+                # 5) pe 在 pc 上画筛选后的轮廓
+                im_mosquito = im_color.copy()
+                cv2.drawContours(im_mosquito, contours, -1, (0, 255, 0), 1)  # 绿：筛选后轮廓
+
+                # 6) pf 筛选出蚊子（在 pa 上圈出中心）
+                im_tracking = im_original.copy()
+                for center_info in curr_centers:
+                    cx, cy, area, w, h = center_info
+                    x, y = int(cx), int(cy)
+                    cv2.circle(im_tracking, (x, y), 15, (0, 0, 255), 2)
+                    cv2.circle(im_tracking, (x, y), 3, (255, 0, 0), -1)
+
+                # 拼接显示（2x3布局）
+                row1 = np.hstack([im_original, im_motion, im_color])
+                row2 = np.hstack([im_contour, im_mosquito, im_tracking])
+                combined = np.vstack([row1, row2])
+
+                # === 保存片段：原始帧(带框) + combined（同样前/后帧数）===
+                detected = len(curr_centers) > 0
+                if clip_saver is not None:
+                    save_frame = frame.copy()
+                    for cx, cy, area, ww, hh in curr_centers:
+                        x, y = int(cx), int(cy)
+                        bw = max(10, int(ww))
+                        bh = max(10, int(hh))
+                        x1 = max(0, x - bw // 2)
+                        y1 = max(0, y - bh // 2)
+                        x2 = min(width - 1, x + bw // 2)
+                        y2 = min(height - 1, y + bh // 2)
+                        cv2.rectangle(save_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                    clip_saver.push(save_frame, detected, fps or 30.0, width, height, base_name, frame_idx)
+                if clip_saver_combined is not None:
+                    ch, cw = combined.shape[:2]
+                    clip_saver_combined.push(
+                        combined, detected, fps or 30.0, cw, ch, f"{base_name}_combined", frame_idx
+                    )
+
+                # 添加标签
+                cv2.putText(combined, '1.original', (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(combined, '2.motion_filtered', (width + 10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(combined, '3.color_filtered', (width * 2 + 10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(combined, '4.all_contours', (10, height + 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(combined, '5.shape_filtered', (width + 10, height + 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(combined, '6.tracking', (width * 2 + 10, height + 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                if SHOW_UI:
+                    cv2.imshow('Mosquito Tracking', combined)
+
+            # 处理按键
+            if SHOW_UI:
+                key = cv2.waitKey(delay if not paused else 100) & 0xFF
+                if key == ord('q'):
+                    break
+                elif key == ord(' '):
+                    paused = not paused
+                    print(f"[帧{frame_idx}] {'暂停' if paused else '继续'}")
+            else:
+                # 无窗口模式：简单限速，退出用 Ctrl+C
+                time.sleep(0.001)
+    except KeyboardInterrupt:
+        print("\n收到 Ctrl+C，退出")
     
     cap.release()
     if clip_saver is not None:

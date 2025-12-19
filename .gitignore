@@ -19,3 +19,4 @@ __pycache__/
 # sense/*/calib/*.npz
 # sense/*/calib/*.json
 laser_killer.egg-info/
+sense_test/mosquito_clips/
