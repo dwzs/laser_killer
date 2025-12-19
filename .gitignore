@@ -18,3 +18,4 @@ __pycache__/
 # sense/*/calib/calib_images/
 # sense/*/calib/*.npz
 # sense/*/calib/*.json
+laser_killer.egg-info/
